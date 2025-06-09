@@ -15,14 +15,9 @@ python create_test_data.py
 
 TODO
 
-- scene labeling status, which frames and when
-- ensure dataset has access to ml_runs (should be there already)
-- ml runs needs hyper params, iou values, end time
-- somehow reference files used
+- somehow reference files used -> can be inferred from db data
+- handle missing gps, undefined
 
-Of course. Here is a design layout for a data management platform for a 3D point cloud classification algorithm.
-
----
 
 ### **Platform Name: Lidar Analytics & Model Management (LAMM)**
 

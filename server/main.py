@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from enum import Enum
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship, delete
@@ -67,6 +67,7 @@ class SequenceUpdate(SQLModel):
     name: str | None = None
     duration: float | None = None
     gps: str | None = None
+    # list of (frame_id, created_at_timestamp) tuples, encoded as json for db
     labeled_frames: str | None = None
 
 
@@ -134,6 +135,8 @@ class TrainingRunBase(SQLModel):
     started_by: str | None = Field(default=None)
     # One of: 'NotStarted', 'Started', 'Finished', 'Failed'
     status: TrainingStatus = Field(default=TrainingStatus.NOT_STARTED)
+    # json encoded
+    hyper_parameters: str | None = Field(default=None)
     train_loss: float | None = Field(default=None)
     val_loss: float | None = Field(default=None)
 
@@ -186,18 +189,21 @@ async def lifespan(app: FastAPI):
 SessionDep = Annotated[Session, Depends(get_session)]
 app = FastAPI(lifespan=lifespan)
 
-origins = [
-    "http://localhost",
-    "http://localhost:8080",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=['*'],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.post("/testing/reset-database", status_code=200)

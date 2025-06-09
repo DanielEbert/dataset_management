@@ -27,6 +27,10 @@ for i in range(NUM_SEQUENCES):
     })
     assert resp.status_code == 200, f'{resp.status_code} {resp.text}'
 
+for i in range(2):
+    resp = requests.post(f'{BASE_URL}/sequences/', json={'name': f'seq{8+i}', 'duration': 10})
+    assert resp.status_code == 200, f'{resp.status_code} {resp.text}'
+
 resp = requests.post(f"{BASE_URL}/datasets/", json={'name': 'ds1', 'creator': 'user', 'train_sequence_names': [f'seq{i}' for i in range(0, 2)], 'val_sequence_names': ['seq4']})
 assert resp.status_code == 200, f'{resp.status_code} {resp.text}'
 
