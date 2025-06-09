@@ -7,7 +7,7 @@ from enum import Enum
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
+from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship, delete
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -18,15 +18,22 @@ from map import _create_and_save_image
 CACHE_DIR = '.cache'
 
 
+class SplitType(str, Enum):
+    TRAIN = "train"
+    VAL = "val"
+    TEST = "test"
+
 class DatasetSequenceLink(SQLModel, table=True):
     sequence_id: int | None = Field(default=None, foreign_key='sequence.id', primary_key=True)
     dataset_id: int | None = Field(default=None, foreign_key='dataset.id', primary_key=True)
+    split_type: SplitType = Field(default=SplitType.TRAIN)
 
 
 class SequenceBase(SQLModel):
     name: str = Field(index=True, unique=True)
     duration: float
     gps: str | None = Field(default=None)
+    labeled_frames: str = "[]"
 
 class Sequence(SequenceBase, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -60,6 +67,7 @@ class SequenceUpdate(SQLModel):
     name: str | None = None
     duration: float | None = None
     gps: str | None = None
+    labeled_frames: str | None = None
 
 
 class SequenceUncertaintyBase(SQLModel):
@@ -101,11 +109,14 @@ class Dataset(DatasetBase, table=True):
 
 
 class DatasetCreate(DatasetBase):
-    sequence_names: list[str]
+    train_sequence_names: list[str] = []
+    val_sequence_names: list[str] = []
 
 class DatasetUpdate(BaseModel):
-    sequence_names_to_add: list[str]
-    sequence_names_to_remove: list[str]
+    train_sequence_names_to_add: list[str] | None = None
+    train_sequence_names_to_remove: list[str] | None = None
+    val_sequence_names_to_add: list[str] | None = None
+    val_sequence_names_to_remove: list[str] | None = None
 
 class DatasetPublic(DatasetBase):
     id: int
@@ -120,7 +131,7 @@ class TrainingStatus(str, Enum):
 
 class TrainingRunBase(SQLModel):
     model_pt_path: str
-    creator: str | None = Field(default=None)
+    started_by: str | None = Field(default=None)
     # One of: 'NotStarted', 'Started', 'Finished', 'Failed'
     status: TrainingStatus = Field(default=TrainingStatus.NOT_STARTED)
     train_loss: float | None = Field(default=None)
@@ -138,7 +149,7 @@ class TrainingRunCreate(TrainingRunBase):
 
 class TrainingRunUpdate(BaseModel):
     model_pt_path: str | None = None
-    creator: str | None = None
+    started_by: str | None = None
     status: TrainingStatus | None = None
     train_loss: float | None = None
     val_loss: float | None = None
@@ -293,24 +304,25 @@ def delete_sequence_uncertainties(seq_id: int, session: Session = Depends(get_se
     return
 
 
+def get_sequences_or_404(names: list[str], split_type: str, session: SessionDep) -> list[Sequence]:
+    sequences = session.exec(select(Sequence).where(Sequence.name.in_(names))).all()
+    if len(sequences) != len(names):
+        missing = set(names) - {seq.name for seq in sequences}
+        raise HTTPException(404, f"Missing {split_type} sequences: {', '.join(missing)}")
+    return sequences
+
 @app.post('/datasets/', response_model=DatasetPublic)
 def create_dataset(ds_create: DatasetCreate, session: SessionDep):
-    sequences_in_db = session.exec(
-        select(Sequence).where(Sequence.name.in_(ds_create.sequence_names))
-    ).all()
+    train_seqs = get_sequences_or_404(ds_create.train_sequence_names, "train", session)
+    val_seqs = get_sequences_or_404(ds_create.val_sequence_names, "val", session)
 
-    if len(sequences_in_db) != len(ds_create.sequence_names):
-        found_names = {seq.name for seq in sequences_in_db}
-        missing_names = set(ds_create.sequence_names) - found_names
-        raise HTTPException(
-            status_code=404,
-            detail=f"The following sequences were not found: {', '.join(missing_names)}"
-        )
-    
-    db_ds = Dataset(**ds_create.model_dump(exclude={'sequence_names'}))
-    db_ds.sequences = sequences_in_db
-
+    db_ds = Dataset(**ds_create.model_dump(exclude={'train_sequence_names', 'val_sequence_names'}))
     session.add(db_ds)
+    session.flush()
+
+    for seq, split in [(train_seqs, SplitType.TRAIN), (val_seqs, SplitType.VAL)]:
+        session.add_all([DatasetSequenceLink(dataset_id=db_ds.id, sequence_id=s.id, split_type=split) for s in seq])
+
     session.commit()
     session.refresh(db_ds)
     return db_ds
@@ -335,38 +347,43 @@ def update_dataset(dataset_id: int, update_data: DatasetUpdate, session: Session
     db_dataset = session.get(Dataset, dataset_id)
     if not db_dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    
-    current_sequence_names = {seq.name for seq in db_dataset.sequences}
-    
-    if update_data.sequence_names_to_remove:
-        names_to_remove_set = set(update_data.sequence_names_to_remove)
-        db_dataset.sequences = [
-            seq for seq in db_dataset.sequences 
-            if seq.name not in names_to_remove_set
-        ]
-        current_sequence_names -= names_to_remove_set
-    
-    if update_data.sequence_names_to_add:
-        new_names_to_add = [
-            name for name in update_data.sequence_names_to_add 
-            if name not in current_sequence_names
-        ]
-        if new_names_to_add:
-            sequences_from_db = session.exec(
-                select(Sequence).where(Sequence.name.in_(new_names_to_add))
-            ).all()
 
-            if len(sequences_from_db) != len(new_names_to_add):
-                found_names = {seq.name for seq in sequences_from_db}
-                missing_names = set(new_names_to_add) - found_names
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Cannot add sequences, the following were not found: {', '.join(missing_names)}"
-                ) 
-
-        db_dataset.sequences.extend(sequences_from_db)
+    def remove_links(names: list[str], split_type: SplitType):
+        if not names:
+            return
+        sequences = get_sequences_or_404(names)
+        session.exec(
+            delete(DatasetSequenceLink).where(
+                DatasetSequenceLink.dataset_id == dataset_id,
+                DatasetSequenceLink.sequence_id.in_([seq.id for seq in sequences]),
+                DatasetSequenceLink.split_type == split_type
+            )
+        )
     
-    session.add(db_dataset)
+    def add_links(names: list[str], split_type: SplitType):
+        if not names:
+            return
+        sequences = get_sequences_or_404(names)
+        existing = session.exec(
+            select(DatasetSequenceLink.sequence_id).where(
+                DatasetSequenceLink.dataset_id == dataset_id,
+                DatasetSequenceLink.sequence_id.in_([seq.id for seq in sequences]),
+                DatasetSequenceLink.split_type == split_type
+            )
+        ).all()
+
+        new_links = [
+            DatasetSequenceLink(dataset_id=dataset_id, sequence_id=seq.id, split_type=split_type)
+            for seq in sequences if seq.id not in existing
+        ]
+        session.add_all(new_links)
+
+    remove_links(update_data.train_sequence_names_to_remove or [], SplitType.TRAIN)
+    remove_links(update_data.val_sequence_names_to_remove or [], SplitType.VAL)
+
+    add_links(update_data.train_sequence_names_to_add or [], SplitType.TRAIN)
+    add_links(update_data.val_sequence_names_to_add or [], SplitType.VAL)
+
     session.commit()
     session.refresh(db_dataset)
     return db_dataset
@@ -399,15 +416,15 @@ def read_training_runs(
     limit: int = Query(100, ge=1, le=1000, description="Number of records to return"),
     # TODO: same for other read all calls
     status: Optional[TrainingStatus] = Query(None, description="Filter by training status"),
-    creator: Optional[str] = Query(None, description="Filter by creator"),
+    started_by: Optional[str] = Query(None, description="Filter by started_by"),
     session: Session = Depends(get_session)
 ):
     query = select(TrainingRun)
     
     if status:
         query = query.where(TrainingRun.status == status)
-    if creator:
-        query = query.where(TrainingRun.creator == creator)
+    if started_by:
+        query = query.where(TrainingRun.started_by == started_by)
     
     query = query.offset(skip).limit(limit)
     
