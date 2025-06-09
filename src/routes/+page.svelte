@@ -8,6 +8,7 @@
 		avg_uncertainty: number | null | undefined;
 		max_uncertainty: number | null | undefined;
 		gps: string | null | undefined;
+		raw_sequence: any;
 	}
 
 	let isLoading = $state(true);
@@ -119,7 +120,8 @@
 					duration: seq.duration,
 					avg_uncertainty: seq.latest_uncertainty?.avg_uncertainty ?? null,
 					max_uncertainty: seq.latest_uncertainty?.max_uncertainty ?? null,
-					gps: seq.gps
+					gps: seq.gps,
+					raw_sequence: seq
 				}));
 
 				table = new DataTable({
@@ -311,6 +313,12 @@
 		<p class="text-sm text-gray-700">
 			<span class="font-semibold">Selected IDs:</span>
 			{Array.from(selectedIds).join(', ') || 'None'}
+		</p>
+	</div>
+	<div class="mt-4">
+		<p class="text-sm text-gray-700">
+			<span class="font-semibold">Scene Count:</span>
+			{table.allRows.length}
 		</p>
 	</div>
 {/if}
